@@ -1,0 +1,190 @@
+name: Build GhostScript Binaries
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Force build specific version (e.g., ghostscript-10.03.0)'
+        required: false
+        type: string
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      latest_tag: ${{ steps.check.outputs.latest_tag }}
+      release_name: ${{ steps.check.outputs.release_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for new upstream release
+        id: check
+        run: |
+          # Fetch latest release from upstream ghostpdl-downloads repo
+          LATEST_RELEASE=$(curl -s https://api.github.com/repos/ArtifexSoftware/ghostpdl-downloads/releases/latest)
+          LATEST_TAG=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
+          RELEASE_NAME=$(echo "$LATEST_RELEASE" | jq -r '.name')
+          
+          # Check if manual version specified
+          if [ -n "${{ inputs.force_version }}" ]; then
+            LATEST_TAG="${{ inputs.force_version }}"
+            RELEASE_NAME="${{ inputs.force_version }}"
+            echo "Force building version: $LATEST_TAG"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "Latest upstream release: $LATEST_TAG"
+          
+          # Check if we already have this release
+          if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
+            echo "Release $LATEST_TAG already exists in this repository"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "New release detected: $LATEST_TAG"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-release
+    if: needs.check-release.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            libfreetype6-dev \
+            libjpeg-dev \
+            libpng-dev \
+            zlib1g-dev \
+            liblcms2-dev \
+            libfontconfig1-dev \
+            libcups2-dev \
+            libtiff-dev \
+            libexpat1-dev
+
+      - name: Download GhostScript source
+        run: |
+          TAG="${{ needs.check-release.outputs.latest_tag }}"
+          VERSION="${TAG#ghostscript-}"
+          # Convert version format: 10.06.0 -> gs10060 for the release tag
+          GS_TAG="gs$(echo $VERSION | tr -d '.')"
+          
+          echo "Downloading ghostscript-${VERSION}.tar.gz from release tag ${GS_TAG}"
+          
+          # Download tarball from ghostpdl-downloads releases
+          curl -L "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/${GS_TAG}/ghostscript-${VERSION}.tar.gz" \
+            -o ghostscript.tar.gz
+          
+          # Extract
+          tar -xzf ghostscript.tar.gz
+          
+          # The extracted directory will be ghostscript-{version}
+          echo "EXTRACTED_DIR=ghostscript-${VERSION}" >> $GITHUB_ENV
+
+      - name: Configure GhostScript
+        working-directory: ${{ env.EXTRACTED_DIR }}
+        run: |
+          ./autogen.sh
+          ./configure \
+            --prefix=/opt/ghostscript \
+            --disable-cups \
+            --disable-gtk \
+            --without-x \
+            --without-tesseract
+
+      - name: Build GhostScript
+        working-directory: ${{ env.EXTRACTED_DIR }}
+        run: |
+          make -j$(nproc)
+
+      - name: Create binary archive
+        run: |
+          TAG="${{ needs.check-release.outputs.latest_tag }}"
+          VERSION="${TAG#ghostscript-}"
+          
+          # Create output directory
+          mkdir -p output
+          
+          # Copy binary
+          cp "${{ env.EXTRACTED_DIR }}/bin/gs" output/gs
+          
+          # Make it executable
+          chmod +x output/gs
+          
+          # Create tarball
+          cd output
+          tar -czf "../ghostscript-${VERSION}-linux-amd64.tar.gz" gs
+          cd ..
+          
+          # Also create a zip
+          cd output
+          zip "../ghostscript-${VERSION}-linux-amd64.zip" gs
+          cd ..
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostscript-amd64
+          path: |
+            ghostscript-*.tar.gz
+            ghostscript-*.zip
+
+  release:
+    needs: [check-release, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ghostscript-amd64
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.check-release.outputs.latest_tag }}"
+          RELEASE_NAME="${{ needs.check-release.outputs.release_name }}"
+          VERSION="${TAG#ghostscript-}"
+          GS_TAG="gs$(echo $VERSION | tr -d '.')"
+          
+          # Create release with inline notes
+          gh release create "$TAG" \
+            --title "$RELEASE_NAME - AMD64 Binary" \
+            --notes "Automated build of GhostScript for Linux AMD64
+          
+          Built from upstream: https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/tag/${GS_TAG}
+          
+          Binary Information:
+          - Platform: Linux AMD64
+          - Binary: gs
+          - Source: Official ArtifexSoftware/ghostpdl-downloads release
+          
+          Installation:
+          tar -xzf ghostscript-${VERSION}-linux-amd64.tar.gz
+          chmod +x gs
+          ./gs --version" \
+            ghostscript-*.tar.gz \
+            ghostscript-*.zip
