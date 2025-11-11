@@ -83,10 +83,35 @@ jobs:
       - name: Download GhostScript source
         run: |
           TAG="${{ needs.check-release.outputs.latest_tag }}"
-          VERSION="${TAG#ghostscript-}"
-          # Convert version format: 10.06.0 -> gs10060 for the release tag
-          GS_TAG="gs$(echo $VERSION | tr -d '.')"
           
+          # Handle both tag formats:
+          # - "ghostscript-10.03.0" (manual input format)
+          # - "gs10030" (API returned format from upstream)
+          if [[ "$TAG" == ghostscript-* ]]; then
+            # Format: ghostscript-10.03.0
+            VERSION="${TAG#ghostscript-}"
+            GS_TAG="gs$(echo $VERSION | tr -d '.')"
+          elif [[ "$TAG" == gs* ]]; then
+            # Format: gs10030 (already in the correct format for upstream)
+            GS_TAG="$TAG"
+            # Convert gs10030 -> 10.03.0 for directory name
+            VERSION_NUM="${TAG#gs}"
+            # Insert dots: 10030 -> 10.03.0
+            if [[ ${#VERSION_NUM} -eq 5 ]]; then
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4:1}"
+            elif [[ ${#VERSION_NUM} -eq 6 ]]; then
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4:2}"
+            else
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4}"
+            fi
+          else
+            echo "Error: Unknown tag format: $TAG"
+            exit 1
+          fi
+          
+          echo "Tag: $TAG"
+          echo "Version: $VERSION"
+          echo "GS Tag: $GS_TAG"
           echo "Downloading ghostscript-${VERSION}.tar.gz from release tag ${GS_TAG}"
           
           # Download tarball from ghostpdl-downloads releases
@@ -118,7 +143,24 @@ jobs:
       - name: Create binary archive
         run: |
           TAG="${{ needs.check-release.outputs.latest_tag }}"
-          VERSION="${TAG#ghostscript-}"
+          
+          # Handle both tag formats consistently
+          if [[ "$TAG" == ghostscript-* ]]; then
+            VERSION="${TAG#ghostscript-}"
+          elif [[ "$TAG" == gs* ]]; then
+            # Convert gs10030 -> 10.03.0
+            VERSION_NUM="${TAG#gs}"
+            if [[ ${#VERSION_NUM} -eq 5 ]]; then
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4:1}"
+            elif [[ ${#VERSION_NUM} -eq 6 ]]; then
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4:2}"
+            else
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4}"
+            fi
+          else
+            echo "Error: Unknown tag format: $TAG"
+            exit 1
+          fi
           
           # Create output directory
           mkdir -p output
@@ -167,8 +209,28 @@ jobs:
         run: |
           TAG="${{ needs.check-release.outputs.latest_tag }}"
           RELEASE_NAME="${{ needs.check-release.outputs.release_name }}"
-          VERSION="${TAG#ghostscript-}"
-          GS_TAG="gs$(echo $VERSION | tr -d '.')"
+          
+          # Handle both tag formats consistently with download step
+          if [[ "$TAG" == ghostscript-* ]]; then
+            # Format: ghostscript-10.03.0
+            VERSION="${TAG#ghostscript-}"
+            GS_TAG="gs$(echo $VERSION | tr -d '.')"
+          elif [[ "$TAG" == gs* ]]; then
+            # Format: gs10030 (already in the correct format for upstream)
+            GS_TAG="$TAG"
+            # Convert gs10030 -> 10.03.0 for display
+            VERSION_NUM="${TAG#gs}"
+            if [[ ${#VERSION_NUM} -eq 5 ]]; then
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4:1}"
+            elif [[ ${#VERSION_NUM} -eq 6 ]]; then
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4:2}"
+            else
+              VERSION="${VERSION_NUM:0:2}.${VERSION_NUM:2:2}.${VERSION_NUM:4}"
+            fi
+          else
+            echo "Error: Unknown tag format: $TAG"
+            exit 1
+          fi
           
           # Create release with inline notes
           gh release create "$TAG" \
